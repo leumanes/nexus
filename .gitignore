@@ -1,0 +1,5 @@
+.env
+certs/server.key
+certs/server.crt
+backups/
+.DS_Store

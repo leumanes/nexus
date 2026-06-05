@@ -1,0 +1,108 @@
+name: wp-local
+
+services:
+  db:
+    image: mariadb:11
+    restart: unless-stopped
+    environment:
+      MYSQL_ROOT_PASSWORD: ${DB_ROOT_PASSWORD}
+      MYSQL_DATABASE: wordpress
+      MYSQL_USER: wordpress
+      MYSQL_PASSWORD: ${DB_PASSWORD}
+    volumes:
+      - db_data:/var/lib/mysql
+    networks:
+      - backend
+    healthcheck:
+      test: ["CMD", "mariadb-admin", "ping", "-h", "localhost"]
+      start_period: 20s
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  wordpress:
+    # Verify exact tag at: https://hub.docker.com/hardened-images/catalog/dhi/wordpress
+    image: dhi.io/wordpress:7.0-php8.5-fpm
+    restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      WORDPRESS_DB_HOST: db:3306
+      WORDPRESS_DB_USER: wordpress
+      WORDPRESS_DB_PASSWORD: ${DB_PASSWORD}
+      WORDPRESS_DB_NAME: wordpress
+      WORDPRESS_CONFIG_EXTRA: |
+        define('DISALLOW_FILE_EDIT', true);
+        define('FORCE_SSL_ADMIN', true);
+        define('FORCE_SSL_LOGIN', true);
+        define('WP_SITEURL', 'https://${WP_DOMAIN}:${WP_PORT:-443}');
+        define('WP_HOME', 'https://${WP_DOMAIN}:${WP_PORT:-443}');
+    volumes:
+      - wp_files:/var/www/html
+      - ./uploads.ini:/opt/php-8.5/etc/php/conf.d/uploads.ini:ro
+      - ./mu-plugins:/var/www/html/wp-content/mu-plugins:ro
+    networks:
+      - backend
+    healthcheck:
+      # bash /dev/tcp is available in the DHI image; php CLI is not.
+      test: ["CMD", "bash", "-c", "true > /dev/tcp/127.0.0.1/9000"]
+      start_period: 30s
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  wpcli:
+    image: wordpress:cli
+    user: "65532:65532"
+    profiles: ["cli"]
+    depends_on:
+      db:
+        condition: service_healthy
+      wordpress:
+        condition: service_started
+    environment:
+      WORDPRESS_DB_HOST: db:3306
+      WORDPRESS_DB_USER: wordpress
+      WORDPRESS_DB_PASSWORD: ${DB_PASSWORD}
+      WORDPRESS_DB_NAME: wordpress
+    volumes:
+      - wp_files:/var/www/html
+      - ./uploads.ini:/usr/local/etc/php/conf.d/uploads.ini:ro
+      - ./mu-plugins:/var/www/html/wp-content/mu-plugins:ro
+    networks:
+      - backend
+
+  caddy:
+    image: caddy:2-alpine
+    restart: unless-stopped
+    depends_on:
+      wordpress:
+        condition: service_healthy
+    environment:
+      WP_DOMAIN: ${WP_DOMAIN}
+    ports:
+      - "80:80"
+      - "${WP_PORT:-443}:443"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - ./certs:/etc/caddy/certs:ro
+      - wp_files:/var/www/html:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    networks:
+      - backend    # reaches wordpress via FastCGI
+      - frontend   # publishes ports to host
+
+networks:
+  backend:
+    driver: bridge
+    internal: true   # db and wordpress have no internet access
+  frontend:
+    driver: bridge   # caddy can receive connections from host
+
+volumes:
+  db_data:
+  wp_files:
+  caddy_data:
+  caddy_config:

@@ -1,0 +1,26 @@
+{$WP_DOMAIN} {
+    tls /etc/caddy/certs/server.crt /etc/caddy/certs/server.key
+
+    root * /var/www/html
+    encode gzip zstd
+
+    header {
+        X-Frame-Options        "SAMEORIGIN"
+        X-Content-Type-Options "nosniff"
+        Referrer-Policy        "no-referrer"
+    }
+
+    # Caddy sets HTTPS=on in FastCGI vars automatically for TLS connections
+    php_fastcgi wordpress:9000
+
+    file_server
+
+    log {
+        output stdout
+        format console
+    }
+}
+
+http://{$WP_DOMAIN} {
+    redir https://{$WP_DOMAIN}{uri} permanent
+}
