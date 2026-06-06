@@ -204,7 +204,10 @@ docker compose run --rm wpcli wp user application-password create YOUR_USERNAME 
 docker compose run --rm wpcli wp user application-password create coder-agent    "API" --porcelain
 # ... repeat for other users
 
-# Store the passwords in your chosen credential manager
+# Store the passwords in your chosen credential manager under the `app:` namespace
+skate set 'app:coder-agent@YOUR_DOMAIN' "<the password shown above>"
+skate set 'app:qa-agent@YOUR_DOMAIN' "<the password shown above>"
+# ... repeat for reviewer-agent, scrum-agent, etc.
 ```
 
 ### 10. Install the MCP adapter plugin
@@ -274,11 +277,40 @@ Most clients also distinguish between a user-wide (global) and a project-scoped 
 
 After registration, test that the `posts/list`, `posts/get`, `posts/add-comment`, etc. abilities are available.
 
+### 12. Agent Bootstrap (final setup step)
+
+This is the final step of the setup process (requires skate). It wires the agent prefix trigger (`coder-agent:`, `reviewer-agent:`, `qa-agent:`, or `scrum-agent:`) so that your AI client automatically fetches `STEERING.md` from skate and loads it as operational context.
+
+#### 1. Load STEERING.md into skate
+
+Run this command (stores the guide under the key `agents-guide@nexus`):
+
+```bash
+skate set "agents-guide@nexus" "$(cat STEERING.md)"
+```
+
+Re-run this whenever `STEERING.md` changes.
+
+#### 2. Add the harness instruction to your AI client
+
+Add the instruction block from `BOOTSTRAP.md` to your AI client's global memory file. The table of client files and the exact instruction text are in `BOOTSTRAP.md`.
+
+After adding it, restart your AI client or session.
+
+#### Verification
+
+- Test by prefixing a message with e.g. `coder-agent: hello` in your AI client.
+- The agent should respond acknowledging the identity and that the guide was loaded.
+
+This completes the interactive/manual setup.
+
 ---
 
 ## Credentials
 
-Store application passwords (not the initial login passwords) in your credential manager using a key like `username@your-domain`.
+Store application passwords (not the initial login passwords) in your credential manager using a key like `app:username@your-domain`.
+
+> **Migration note (if you set up before this hotfix):** Re-key any existing entries with `skate set 'app:<username>@YOUR_DOMAIN' "<password>"`.
 
 Retrieval is client-specific. Most clients have a `get` or `read` command.
 

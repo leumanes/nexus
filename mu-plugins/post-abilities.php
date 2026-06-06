@@ -20,7 +20,7 @@ add_action( 'wp_abilities_api_init', function () {
 	// ── posts/list ────────────────────────────────────────────────────────────
 	wp_register_ability( 'posts/list', [
 		'label'       => 'List Posts',
-		'description' => 'List published posts. Optionally filter by category slug or status tag.',
+		'description' => 'List published posts. Optionally filter by category slug, tag, or search term.',
 		'category'    => 'posts',
 		'input_schema' => [
 			'type'       => 'object',
@@ -32,6 +32,10 @@ add_action( 'wp_abilities_api_init', function () {
 				'tag' => [
 					'type'        => 'string',
 					'description' => 'Filter by tag slug (e.g. "in-progress"). Omit for all tags.',
+				],
+				'search' => [
+					'type'        => 'string',
+					'description' => 'Search term matched against post title and content.',
 				],
 				'per_page' => [
 					'type'        => 'integer',
@@ -51,6 +55,7 @@ add_action( 'wp_abilities_api_init', function () {
 			];
 			if ( ! empty( $input['category'] ) ) $args['category_name'] = $input['category'];
 			if ( ! empty( $input['tag'] ) )      $args['tag']           = $input['tag'];
+			if ( ! empty( $input['search'] ) ) $args['s'] = $input['search'];
 
 			return array_map( '_post_ability_summary', get_posts( $args ) );
 		},
