@@ -65,6 +65,7 @@ Work through the steps in README.md, but:
 - When you reach a step that requires human action (trusting the certificate in the OS keychain, or the optional per-application `NODE_EXTRA_CA_CERTS` fallback), stop, print the exact command the human must run, and wait for confirmation before continuing.
 - After every major step, run a quick verification command and report the result.
 - **Port handling**: After copying `.env.example`, ensure `WP_PORT` is set to the value chosen in configuration question 2 (or 443). The `docker-compose.yml` will automatically use it for the host port mapping. If the chosen port is not 443, remember to use the full URL with port (e.g. https://DOMAIN:8443) in subsequent `wp core install --url=...` and verification steps.
+- **Bootstrap step (final)**: After the MCP registration step, perform the Agent Bootstrap (new step 12 in README; requires skate) as the very last setup action. Ask which AI client the human uses, show the exact `skate set "agents-guide@nexus" "$(cat STEERING.md)"` command from the README, obtain explicit confirmation ("yes, run it") before executing the skate command, then display the instruction text and client file path from `BOOTSTRAP.md` and tell the human to add it to their global memory file and restart their AI session/client. Include a verification step where the human tests a `coder-agent:` (or similar) prefixed message.
 
 ## Final Verification (Generic Commands)
 
