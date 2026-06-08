@@ -37,6 +37,10 @@ add_action( 'wp_abilities_api_init', function () {
 					'type'        => 'string',
 					'description' => 'Search term matched against post title and content.',
 				],
+				'slug' => [
+					'type'        => 'string',
+					'description' => 'Exact post slug — the last path segment of a Nexus URL (e.g. "my-post-title" from ".../my-post-title/"). Use this to resolve a URL to its post; it matches the slug exactly, unlike "search" which only matches title/content.',
+				],
 				'per_page' => [
 					'type'        => 'integer',
 					'description' => 'Max results to return (default 20, max 100).',
@@ -55,9 +59,10 @@ add_action( 'wp_abilities_api_init', function () {
 			];
 			if ( ! empty( $input['category'] ) ) $args['category_name'] = $input['category'];
 			if ( ! empty( $input['tag'] ) )      $args['tag']           = $input['tag'];
-			if ( ! empty( $input['search'] ) ) $args['s'] = $input['search'];
+			if ( ! empty( $input['search'] ) ) $args['s']    = $input['search'];
+			if ( ! empty( $input['slug'] ) )   $args['name'] = sanitize_title( $input['slug'] );
 
-			return array_map( '_post_ability_summary', get_posts( $args ) );
+			return [ 'posts' => array_map( '_post_ability_summary', get_posts( $args ) ) ];
 		},
 		'meta' => [
 			'mcp'         => [ 'public' => true ],
@@ -223,8 +228,29 @@ add_action( 'wp_abilities_api_init', function () {
 			$user   = wp_get_current_user();
 			$author = ! empty( $input['author'] ) ? sanitize_text_field( $input['author'] ) : $user->display_name;
 
-			// Prevent impersonating another registered WordPress user.
-			if ( $author !== $user->display_name ) {
+			// The comment is owned by the authenticated user UNLESS the author
+			// string resolves to a real (non-admin) account — then attribute it to
+			// that account so WordPress computes a distinct avatar and genuine
+			// ownership per agent identity. Agents pass their login (e.g.
+			// "coder-agent"); $author stays the passed string for display and for
+			// get-comment author filtering.
+			//
+			// Design note (per code review): this branch uses a *single shared service
+			// account* for all MCP calls (app:*-agent passwords). The `author` param
+			// is the mechanism to pick per-agent identity/avatar. The only guard is
+			// the manage_options check on the resolved account. If the model ever
+			// changes to per-agent logins, add `$resolved->ID === $user->ID ||
+			// current_user_can('edit_users')` here.
+			$author_user_id = $user->ID;
+			$author_email   = $user->user_email;
+
+			$resolved = ! empty( $input['author'] ) ? get_user_by( 'login', $author ) : false;
+			if ( $resolved && ! user_can( $resolved, 'manage_options' ) ) {
+				$author_user_id = $resolved->ID;
+				$author_email   = $resolved->user_email;
+			} elseif ( $author !== $user->display_name ) {
+				// Not an attributable account — block impersonating another
+				// registered user's display name while staying owned by $user.
 				global $wpdb;
 				$taken = $wpdb->get_var( $wpdb->prepare(
 					"SELECT ID FROM {$wpdb->users} WHERE display_name = %s AND ID != %d",
@@ -239,8 +265,8 @@ add_action( 'wp_abilities_api_init', function () {
 				'comment_post_ID'      => $post_id,
 				'comment_content'      => wp_kses_post( $input['content'] ),
 				'comment_author'       => $author,
-				'comment_author_email' => $user->user_email,
-				'user_id'              => $user->ID,
+				'comment_author_email' => $author_email,
+				'user_id'              => $author_user_id,
 				'comment_approved'     => ( get_option( 'comment_moderation' ) || get_option( 'comment_previously_approved' ) ) ? 0 : 1,
 			] );
 
@@ -419,14 +445,14 @@ add_action( 'wp_abilities_api_init', function () {
 			];
 			if ( ! empty( $input['search'] ) ) $args['s'] = $input['search'];
 
-			return array_map( fn( $a ) => [
+			return [ 'media' => array_map( fn( $a ) => [
 				'id'        => $a->ID,
 				'title'     => $a->post_title,
 				'filename'  => wp_basename( get_attached_file( $a->ID ) ),
 				'url'       => wp_get_attachment_url( $a->ID ),
 				'mime_type' => $a->post_mime_type,
 				'date'      => $a->post_date,
-			], get_posts( $args ) );
+			], get_posts( $args ) ) ];
 		},
 		'meta' => [
 			'mcp'         => [ 'public' => true ],

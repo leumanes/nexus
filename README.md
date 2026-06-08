@@ -54,6 +54,8 @@ DB and WordPress are on an internal network (`backend`) with no outbound interne
 ├── mu-plugins/
 │   ├── allow-uploads.php       # Extends WordPress MIME type allowlist
 │   ├── post-abilities.php      # Registers posts/*, media/* MCP abilities
+│   ├── mcp-flat-tools.php      # Exposes each ability as a flat MCP tool; drops the execute-ability wrapper
+│   ├── nexus-defaults.php      # Seeds opinionated WP settings on first boot (idempotent, version-gated)
 │   ├── markdown-comments.php   # Renders markdown in comments at display time
 │   └── Parsedown.php           # Markdown parser (bundled; no Composer)
 ├── certs/               # TLS cert and key (gitignored)
@@ -134,8 +136,16 @@ Regenerate the combined bundle if certifi updates (rare in a fixed dev environme
 
 ```bash
 cp .env.example .env
-# edit .env — set WP_DOMAIN, DB_ROOT_PASSWORD, DB_PASSWORD
+# edit .env — set WP_DOMAIN, WP_PORT, DB_ROOT_PASSWORD, DB_PASSWORD
 ```
+
+Then export the non-secret variables into your current shell. `docker compose` reads `.env` automatically, but your host shell does not — later steps use `${WP_PORT:+:$WP_PORT}` which requires `WP_PORT` to be set in the shell:
+
+```bash
+export WP_PORT=$(grep '^WP_PORT=' .env | cut -d= -f2 | tr -d ' "\r')
+```
+
+Only `WP_PORT` is consumed by shell commands — domain references use the literal `YOUR_DOMAIN` placeholder. Sourcing the full `.env` is avoided because passwords may contain `$`, `#`, or spaces that the shell would misparse. Re-run this in any new terminal before running the setup commands.
 
 > **Note on `WP_HOME` / `WP_SITEURL`:** `docker-compose.yml` sets these as PHP constants via `WORDPRESS_CONFIG_EXTRA`. PHP constants override the WordPress database options, so `wp option update siteurl` and `wp option update home` have no effect. If the site URL ever looks wrong, edit the constants in `docker-compose.yml` and recreate the WordPress container (`docker compose up -d --force-recreate wordpress`).
 
@@ -146,9 +156,12 @@ The hardened image runs as `nonroot` (uid 65532). Pre-create the `wp-content/` t
 **Why this matters:** `docker-compose.yml` bind-mounts `./mu-plugins` into `wp-content/mu-plugins`. When Docker sets up that mount it creates the `wp-content/` path component as root — even if the parent volume is already chowned. The image entrypoint (running as uid 65532) then can't create anything inside `wp-content/`, so themes, plugins, cache, and upgrade directories are never populated. The site loads a blank page. Pre-creating the directories with the correct owner prevents Docker from creating `wp-content/` as root in the first place.
 
 ```bash
+# Pull all images first so caddy:2-alpine is available for the helper container below
+docker compose pull
+
 docker compose up -d db
 
-docker run --rm -v wp-local_wp_files:/var/www/html alpine sh -c "
+docker run --rm -v wp-local_wp_files:/var/www/html caddy:2-alpine sh -c "
   mkdir -p /var/www/html/wp-content/themes \
            /var/www/html/wp-content/plugins \
            /var/www/html/wp-content/uploads \
@@ -169,7 +182,7 @@ docker compose logs -f   # watch until wordpress is healthy (~30s)
 
 ```bash
 docker compose run --rm wpcli wp core install \
-  --url="https://YOUR_DOMAIN" \
+  --url="https://YOUR_DOMAIN${WP_PORT:+:$WP_PORT}" \
   --title="Nexus" \
   --admin_user="YOUR_USERNAME" \
   --admin_password="YOUR_ADMIN_PASSWORD" \
@@ -177,9 +190,40 @@ docker compose run --rm wpcli wp core install \
   --skip-email
 ```
 
+> The `${WP_PORT:+:$WP_PORT}` expansion handles the port automatically once `WP_PORT` is exported (step 3). The URL written here is stored in the database but overridden at runtime by the PHP constants in `docker-compose.yml`, so a mismatch won't break the site.
+
 > Always run `docker compose up -d` before any `docker compose run --rm wpcli` command. If the stack isn't running, `run` starts and stops services itself, leaving the network in a broken state.
 
-### 7. Enable pretty permalinks
+### 7. Install a default theme
+
+The hardened WordPress image does not bundle themes, and the wpcli container has no outbound internet access. Download on the host and copy in via a helper container — the same pattern as the volume pre-chown in step 4.
+
+```bash
+curl -sL "https://downloads.wordpress.org/theme/twentytwentyfive.latest-stable.zip" \
+  -o /tmp/twentytwentyfive.zip
+unzip -q /tmp/twentytwentyfive.zip -d /tmp/
+
+# caddy:2-alpine is already pulled as part of the stack — use it to avoid a fresh pull
+docker run --rm \
+  -v wp-local_wp_files:/var/www/html \
+  -v /tmp/twentytwentyfive:/tmp/twentytwentyfive \
+  caddy:2-alpine sh -c "
+    mkdir -p /var/www/html/wp-content/themes/twentytwentyfive &&
+    cp -r /tmp/twentytwentyfive/. /var/www/html/wp-content/themes/twentytwentyfive &&
+    chown -R 65532:65532 /var/www/html/wp-content/themes/twentytwentyfive
+  "
+
+docker compose run --rm wpcli wp theme activate twentytwentyfive
+```
+
+Verify:
+
+```bash
+docker compose run --rm wpcli wp theme list
+# twentytwentyfive   active   ...
+```
+
+### 8. Enable pretty permalinks
 
 ```bash
 docker compose run --rm wpcli wp rewrite structure '/%postname%/' --hard
@@ -187,14 +231,56 @@ docker compose run --rm wpcli wp rewrite structure '/%postname%/' --hard
 
 The `.htaccess` warning is harmless — Caddy handles routing.
 
-### 8. Create additional users (optional)
+> **Note:** the `nexus-defaults.php` mu-plugin (below) also forces this permalink
+> structure on first boot, so this step is belt-and-suspenders. It's required:
+> agents resolve a Nexus URL by its last path segment (the post slug), which only
+> exists under `/%postname%/` — a plain `?p=N` install has no slug to match.
+
+### Auto-seeded settings (`nexus-defaults.php`)
+
+On the **first request** after a fresh install, `nexus-defaults.php` seeds an
+opinionated set of options for a private, localhost-only agentic CMS. It's gated
+by the `nexus_seed_version` option, so it runs **once** and never clobbers
+changes you later make in wp-admin. Bump `NEXUS_SEED_VERSION` in the file to roll
+out a new batch (re-applies the whole set once).
+
+| Option | Value | Why |
+|---|---|---|
+| `permalink_structure` | `/%postname%/` | Slug-based URL resolution depends on it |
+| `blog_public` | `0` | Discourage search-engine indexing |
+| `thread_comments` | `0` | Work log is linear, not threaded |
+| `page_comments` | `0` | Don't paginate the work log |
+| `close_comments_for_old_posts` | `0` | Old tasks keep accepting comments |
+| `comment_order` | `asc` | Oldest-first reads as a chronological log |
+| `default_comment_status` | `open` | Tasks accept comments by default |
+| `show_avatars` | `1` | Per-agent identicons (see comment attribution) |
+| `show_comments_cookies_opt_in` | `0` | Irrelevant cookie checkbox for a backend |
+| `comment_moderation` | `0` | No manual-approval gate |
+| `comment_previously_approved` | `0` | **Otherwise every agent comment is held → invisible to `posts-get`** |
+| `comments_notify` / `moderation_notify` | `0` | No outbound email noise |
+| `default_ping_status` | `closed` | Not a public blog — no trackbacks |
+| `default_pingback_flag` | `0` | Don't notify linked blogs |
+| `timezone_string` | `$WORDPRESS_TIMEZONE` (default `UTC`) | Local-time work-log timestamps |
+
+It also removes WordPress' stock sample content on first boot — the `Hello world!`
+post, the `Sample Page`, and the draft `Privacy Policy` page — matched by their
+default slugs, so only the untouched defaults are ever deleted (real task posts
+have their own slugs and are never matched).
+
+**Comment attribution:** `posts-add-comment` resolves the `author` field against
+registered non-admin accounts by login. Passing `coder-agent` attributes the
+comment to that account (`user_id`, email → a distinct gravatar/identicon),
+rather than to the API credential's owner. This is why each agent shows a
+different avatar despite all calls authenticating as the same user.
+
+### 9. Create additional users (optional)
 
 ```bash
 docker compose run --rm wpcli wp user create coder-agent    coder@local.dev    --role=editor --user_pass="PASS" --display_name="Coder Agent"
 # ... repeat for other users
 ```
 
-### 9. Generate Application Passwords
+### 10. Generate Application Passwords
 
 Application passwords are the recommended way for MCP / API access.
 
@@ -210,7 +296,7 @@ skate set 'app:qa-agent@YOUR_DOMAIN' "<the password shown above>"
 # ... repeat for reviewer-agent, scrum-agent, etc.
 ```
 
-### 10. Install the MCP adapter plugin
+### 11. Install the MCP adapter plugin
 
 The wpcli container has no internet access — download on the host first.
 
@@ -220,14 +306,15 @@ curl -fsSL -o /tmp/mcp-adapter.zip \
   "https://github.com/WordPress/mcp-adapter/releases/download/v0.5.0/mcp-adapter.zip"
 cd /tmp && unzip -q mcp-adapter.zip
 
-# The zip already contains vendor/ in recent releases. If it does not:
+# The zip already contains vendor/ in recent releases. If it does not,
+# run this on the host (requires internet access and a local composer install or Docker pull):
 # docker run --rm -v /tmp/mcp-adapter:/app -w /app composer:2 install --no-dev --optimize-autoloader --no-interaction
 
 # Copy into the running container
 docker cp /tmp/mcp-adapter wp-local-wordpress-1:/var/www/html/wp-content/plugins/mcp-adapter
 
 # Fix ownership
-docker run --rm -v wp-local_wp_files:/var/www/html alpine \
+docker run --rm -v wp-local_wp_files:/var/www/html caddy:2-alpine \
   chown -R 65532:65532 /var/www/html/wp-content/plugins
 
 # Activate
@@ -237,12 +324,12 @@ docker compose run --rm wpcli wp plugin activate mcp-adapter
 Verify the MCP namespace is registered:
 
 ```bash
-curl -sk https://YOUR_DOMAIN/wp-json/ | python3 -c \
+curl -sk "https://YOUR_DOMAIN${WP_PORT:+:$WP_PORT}/wp-json/" | python3 -c \
   "import sys,json; d=json.load(sys.stdin); print('mcp' in d.get('namespaces',[]))"
 # → True
 ```
 
-### 11. Register the MCP server in your AI client
+### 12. Register the MCP server in your AI client
 
 The MCP endpoint is:
 
@@ -250,9 +337,9 @@ The MCP endpoint is:
 https://YOUR_DOMAIN/wp-json/mcp/mcp-adapter-default-server
 ```
 
-(If using a custom `WP_PORT`, the endpoint is `https://YOUR_DOMAIN:WP_PORT/wp-json/mcp/mcp-adapter-default-server`.)
+(With a custom `WP_PORT`, the port is included automatically by the shell commands below — provided `WP_PORT` was exported in step 3.)
 
-Use **Basic Auth** with one of the application passwords created in step 9:
+Use **Basic Auth** with one of the application passwords created in step 10:
 
 ```bash
 AUTH=$(echo -n "YOUR_USERNAME:APPLICATION_PASSWORD" | base64)
@@ -277,7 +364,7 @@ Most clients also distinguish between a user-wide (global) and a project-scoped 
 
 After registration, test that the `posts/list`, `posts/get`, `posts/add-comment`, etc. abilities are available.
 
-### 12. Agent Bootstrap (final setup step)
+### 13. Agent Bootstrap (final setup step)
 
 This is the final step of the setup process (requires skate). It wires the agent prefix trigger (`coder-agent:`, `reviewer-agent:`, `qa-agent:`, or `scrum-agent:`) so that your AI client automatically fetches `STEERING.md` from skate and loads it as operational context.
 
@@ -339,15 +426,31 @@ docker compose run --rm wpcli wp <command>    # WP-CLI passthrough
 
 ### Update WordPress core and plugins
 
+The wpcli container has no outbound internet access (internal network). `wp core update` and `wp plugin update --all` will fail if run directly — they need to reach wordpress.org.
+
+Workaround: download the update zip on the host and install from the local file. For example:
+
 ```bash
-docker compose run --rm wpcli wp core check-update
-docker compose run --rm wpcli wp core update
-docker compose run --rm wpcli wp plugin update --all
+# Core update from a local zip
+# Stage onto the shared wp_files volume (/var/www/html) — wpcli and wordpress
+# share that volume but have separate /tmp directories.
+curl -sL "https://wordpress.org/latest.zip" -o /tmp/wordpress.zip
+docker cp /tmp/wordpress.zip wp-local-wordpress-1:/var/www/html/wordpress.zip
+docker compose run --rm wpcli wp core update /var/www/html/wordpress.zip
+docker compose run --rm wpcli wp --quiet eval 'unlink(ABSPATH."wordpress.zip");'
+
+# Plugin update from a local zip
+curl -sL "https://downloads.wordpress.org/plugin/example.zip" -o /tmp/example.zip
+docker cp /tmp/example.zip wp-local-wordpress-1:/var/www/html/example.zip
+docker compose run --rm wpcli wp plugin install /var/www/html/example.zip --force
+docker compose run --rm wpcli wp --quiet eval 'unlink(ABSPATH."example.zip");'
 ```
+
+`wp core check-update`, `wp core update` (without a local zip), and `wp plugin update --all` all require outbound access to wordpress.org — none work in the internal network container. The local-zip pattern above is the workaround for core and individual plugins.
 
 ### Update the MCP adapter
 
-Same process as initial install (step 10). Always back up first.
+Same process as initial install (step 11). Always back up first.
 
 ### Update Docker base images
 
