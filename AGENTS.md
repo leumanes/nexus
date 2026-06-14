@@ -25,7 +25,7 @@ Credentials are stored under two key namespaces in skate:
 | Key pattern | Contains | Use for |
 |---|---|---|
 | `app:<username>@YOUR_DOMAIN` | Application Password | REST API / curl calls |
-| `<username>@YOUR_DOMAIN` | Login password | Do NOT use for API calls |
+| `login:<username>@YOUR_DOMAIN` | Login password | Do NOT use for API calls |
 
 Always use the `app:` key for API authentication:
 
