@@ -55,7 +55,7 @@ Comment content renders as markdown.
 ## REST API credentials (fallback only)
 Skate keys follow this convention:
 - `app:<username>@<domain>` — Application Password for REST API / curl (use this one)
-- `<username>@<domain>` — regular login password (do NOT use for API calls)
+- `login:<username>@<domain>` — regular login password (do NOT use for API calls)
 
 `curl -u` auto-encodes Basic Auth:
 ```bash

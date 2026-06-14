@@ -7,10 +7,13 @@ This bootstrap mechanism requires the `skate` credential store. If you chose a d
 
 Add the following to your AI client's global memory or instructions file. Adapt the file path to your client:
 
-| Client | Global memory file |
-|---|----|
+| Client | Global Prose Instructions File (for Agent Harness) |
+|---|---|
 | Claude Code | `~/.claude/CLAUDE.md` |
-| GitHub Copilot CLI | `~/.copilot/settings.json` (check client docs for instruction support) |
+| GitHub Copilot CLI | `~/.copilot/copilot-instructions.md` (check client docs for instruction support) |
+| Grok CLI | `~/.grok/AGENTS.md` |
+| Hermes | `~/.hermes/SOUL.md` |
+| Antigravity (`agy`) | `~/.gemini/GEMINI.md` |
 
 ### Instruction text
 

@@ -90,8 +90,11 @@ openssl req -x509 -nodes -days 365 -newkey rsa:2048 \
   -subj "/C=US/ST=CA/L=MyCity/O=Local Dev/CN=YOUR_DOMAIN" \
   -addext "subjectAltName=DNS:YOUR_DOMAIN,IP:127.0.0.1" \
   -addext "basicConstraints=critical,CA:TRUE,pathlen:0" \
-  -addext "keyUsage=critical,keyCertSign,digitalSignature"
+  -addext "keyUsage=critical,keyCertSign,digitalSignature" \
+  -addext "subjectKeyIdentifier=hash"
 ```
+
+> **macOS / LibreSSL Compatibility Note:** macOS ships with LibreSSL instead of OpenSSL by default. Older versions of LibreSSL (on macOS 12 or earlier) do not support the `-addext` option at all. If the command fails with `unsupported option` (or if `subjectKeyIdentifier=hash` is rejected), the recommended solution is to install OpenSSL v3 via Homebrew (`brew install openssl`) and run the command using `/opt/homebrew/opt/openssl@3/bin/openssl req ...`. Alternatively, if your system's `openssl` supports `-addext` but rejects the specific `subjectKeyIdentifier` extension, you can omit that line.
 
 Trust it in your operating system (for browsers and curl):
 
@@ -155,7 +158,14 @@ The hardened image runs as `nonroot` (uid 65532). Pre-create the `wp-content/` t
 
 **Why this matters:** `docker-compose.yml` bind-mounts `./mu-plugins` into `wp-content/mu-plugins`. When Docker sets up that mount it creates the `wp-content/` path component as root — even if the parent volume is already chowned. The image entrypoint (running as uid 65532) then can't create anything inside `wp-content/`, so themes, plugins, cache, and upgrade directories are never populated. The site loads a blank page. Pre-creating the directories with the correct owner prevents Docker from creating `wp-content/` as root in the first place.
 
+> **Note on `dhi.io` registry credentials:** The hardened WordPress image is pulled from the `dhi.io` registry. This registry requires authentication, but it accepts standard, free Docker Hub credentials. If you do not have a Docker Hub account, you can create one for free at [hub.docker.com](https://hub.docker.com/).
+
 ```bash
+# Log in to the registries that require authentication before pulling
+# (Note: dhi.io accepts your standard Docker Hub credentials)
+docker login dhi.io   # hardened WordPress image (use Docker Hub login)
+docker login         # Docker Hub (if prompted)
+
 # Pull all images first so caddy:2-alpine is available for the helper container below
 docker compose pull
 
@@ -280,20 +290,37 @@ docker compose run --rm wpcli wp user create coder-agent    coder@local.dev    -
 # ... repeat for other users
 ```
 
+Store each user's login password in your credential manager using the `login:` prefix:
+
+```bash
+skate set 'login:coder-agent@YOUR_DOMAIN' "PASS"
+# ... repeat for other users
+```
+
 ### 10. Generate Application Passwords
 
 Application passwords are the recommended way for MCP / API access.
 
-```bash
-# Generate (password shown once)
-docker compose run --rm wpcli wp user application-password create YOUR_USERNAME  "Personal" --porcelain
-docker compose run --rm wpcli wp user application-password create coder-agent    "API" --porcelain
-# ... repeat for other users
+Application passwords are separate from login passwords and scoped to API/MCP access only. Use the `app:` prefix to distinguish them from login passwords (which use `login:`):
 
-# Store the passwords in your chosen credential manager under the `app:` namespace
-skate set 'app:coder-agent@YOUR_DOMAIN' "<the password shown above>"
-skate set 'app:qa-agent@YOUR_DOMAIN' "<the password shown above>"
-# ... repeat for reviewer-agent, scrum-agent, etc.
+```bash
+# Generate (password shown once) and store immediately
+docker compose run --rm wpcli wp user application-password create YOUR_USERNAME  "Personal" --porcelain
+# Store the output password (replace PASSWORD with the actual output of the command above):
+skate set 'app:YOUR_USERNAME@YOUR_DOMAIN' "PASSWORD"
+
+# Repeat for each of the agent accounts:
+docker compose run --rm wpcli wp user application-password create coder-agent    "API" --porcelain
+skate set 'app:coder-agent@YOUR_DOMAIN' "PASSWORD"
+
+docker compose run --rm wpcli wp user application-password create reviewer-agent "API" --porcelain
+skate set 'app:reviewer-agent@YOUR_DOMAIN' "PASSWORD"
+
+docker compose run --rm wpcli wp user application-password create qa-agent       "API" --porcelain
+skate set 'app:qa-agent@YOUR_DOMAIN' "PASSWORD"
+
+docker compose run --rm wpcli wp user application-password create scrum-agent    "API" --porcelain
+skate set 'app:scrum-agent@YOUR_DOMAIN' "PASSWORD"
 ```
 
 ### 11. Install the MCP adapter plugin
@@ -362,6 +389,16 @@ claude mcp add --transport http --scope user \
 
 Most clients also distinguish between a user-wide (global) and a project-scoped registration — choose whichever matches your intended scope.
 
+**Known client config locations** (for reference — always prefer the CLI over hand-editing):
+
+| Client | MCP Registration / Credential Config File |
+|---|---|
+| Claude Code | `~/.claude.json` (via `claude mcp add`) |
+| GitHub Copilot CLI | `~/.copilot/mcp-config.json` |
+| Grok CLI | `~/.grok/config.toml` |
+| Hermes | `~/.hermes/.env` (`MCP_NEXUS_API_KEY=<base64 token>`) |
+| Antigravity (`agy`) | `~/.gemini/config/mcp_config.json` |
+
 After registration, test that the `posts/list`, `posts/get`, `posts/add-comment`, etc. abilities are available.
 
 ### 13. Agent Bootstrap (final setup step)
@@ -380,7 +417,15 @@ Re-run this whenever `STEERING.md` changes.
 
 #### 2. Add the harness instruction to your AI client
 
-Add the instruction block from `BOOTSTRAP.md` to your AI client's global memory file. The table of client files and the exact instruction text are in `BOOTSTRAP.md`.
+Add the instruction block from `BOOTSTRAP.md` to your AI client's global memory file. The exact instruction text is in `BOOTSTRAP.md`. Known file locations:
+
+| Client | Global Prose Instructions File (for Agent Harness) |
+|---|---|
+| Claude Code | `~/.claude/CLAUDE.md` |
+| GitHub Copilot CLI | `~/.copilot/copilot-instructions.md` |
+| Grok CLI | `~/.grok/AGENTS.md` |
+| Hermes | `~/.hermes/SOUL.md` |
+| Antigravity (`agy`) | `~/.gemini/GEMINI.md` |
 
 After adding it, restart your AI client or session.
 
@@ -395,9 +440,14 @@ This completes the interactive/manual setup.
 
 ## Credentials
 
-Store application passwords (not the initial login passwords) in your credential manager using a key like `app:username@your-domain`.
+Use distinct key prefixes to keep login passwords and application passwords separate:
 
-> **Migration note (if you set up before this hotfix):** Re-key any existing entries with `skate set 'app:<username>@YOUR_DOMAIN' "<password>"`.
+| Type | Prefix | Example key |
+|---|---|---|
+| WP admin / user login password | `login:` | `login:manuel@YOUR_DOMAIN` |
+| Application Password (MCP / API) | `app:` | `app:manuel@YOUR_DOMAIN` |
+
+> **Migration note (if you set up before the `login:`/`app:` prefix split introduced in v0.2.0):** Re-key any existing entries with `skate set 'app:<username>@YOUR_DOMAIN' "<password>"`.
 
 Retrieval is client-specific. Most clients have a `get` or `read` command.
 
